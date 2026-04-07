@@ -1,0 +1,7 @@
+streamlit
+numpy
+tifffile
+scikit-image
+scipy
+matplotlib
+xraylib
