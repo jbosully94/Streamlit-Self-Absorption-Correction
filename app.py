@@ -1,16 +1,15 @@
 import streamlit as st
 import numpy as np
 import tifffile
-from skimage.filters import threshold_otsu
 from scipy.ndimage import binary_erosion, binary_dilation
 import xraylib
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import io
 
 st.set_page_config(page_title="SAC Correction", layout="wide")
 st.title("Self-Absorption Correction")
 
+# xraylib uses atomic numbers not element symbols so need this lookup
 Z = {'H': 1, 'C': 6, 'N': 7, 'O': 8, 'P': 15, 'S': 16, 'K': 19, 'Ca': 20, 'Mn': 25, 'Fe': 26, 'Cu': 29, 'Zn': 30}
 
 def show_map(arr, title, cmap='viridis'):
@@ -21,18 +20,30 @@ def show_map(arr, title, cmap='viridis'):
     plt.tight_layout()
     return fig
 
-uploaded = st.file_uploader("Upload XRF map (TIFF)", type=["tif", "tiff"])
+col1, col2 = st.columns(2)
+with col1:
+    mask_upload = st.file_uploader("Upload mask image (TIFF)", type=["tif", "tiff"])
+with col2:
+    data_upload = st.file_uploader("Upload XRF map to correct (TIFF)", type=["tif", "tiff"])
 
-if uploaded:
-    data = tifffile.imread(uploaded).astype(float)
+if mask_upload and data_upload:
+
+    mask_raw = tifffile.imread(mask_upload).astype(float)
+    if mask_raw.ndim == 3:
+        mask_raw = mask_raw[0]
+    mask_raw = np.nan_to_num(mask_raw)
+
+    data = tifffile.imread(data_upload).astype(float)
     if data.ndim == 3:
         data = data[0]
     data = np.nan_to_num(data)
 
     st.subheader("Mask")
 
-    thresh = threshold_otsu(data)
-    mask = (data > thresh).astype(bool)
+    vmin = float(mask_raw.min())
+    vmax = float(mask_raw.max())
+    thresh = st.slider("Threshold", vmin, vmax, (vmin + vmax) / 2.0)
+    mask = (mask_raw > thresh).astype(bool)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -47,7 +58,7 @@ if uploaded:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.pyplot(show_map(data, "original"))
+        st.pyplot(show_map(mask_raw, "mask image"))
     with c2:
         st.pyplot(show_map(mask.astype(float), "mask", cmap='gray'))
 
@@ -81,63 +92,84 @@ if uploaded:
     if st.button("Run correction"):
         with st.spinner("tracing ray paths..."):
 
+            # fluorescence line energy for the selected element
             xrf_energy = xraylib.LineEnergy(Z[element], xraylib.KA1_LINE)
-            mu_exc = sum(f * xraylib.CS_Total(Z[e], exc_energy) for e, f in comp.items())
-            mu_xrf = sum(f * xraylib.CS_Total(Z[e], xrf_energy) for e, f in comp.items())
 
+            # bulk attenuation coefficient = sum over each element in the matrix
+            mu_exc = 0.0
+            mu_xrf = 0.0
+            for el in comp:
+                mu_exc = mu_exc + comp[el] * xraylib.CS_Total(Z[el], exc_energy)
+                mu_xrf = mu_xrf + comp[el] * xraylib.CS_Total(Z[el], xrf_energy)
+
+            # beamline angles are measured from vertical, convert to radians
             a_det = np.radians(90 - det_angle)
             a_exc = np.radians(90 - exc_angle)
-            dx_det, dy_det = -np.cos(a_det), -np.sin(a_det)
-            dx_exc, dy_exc = -np.cos(a_exc), np.sin(a_exc)
+
+            dx_det = -np.cos(a_det)
+            dy_det = -np.sin(a_det)
+            dx_exc = -np.cos(a_exc)
+            dy_exc = np.sin(a_exc)
 
             rows, cols = mask.shape
-            det_paths = np.zeros_like(mask, dtype=float)
-            exc_paths = np.zeros_like(mask, dtype=float)
-            step = 0.1
+            det_paths = np.zeros((rows, cols))
+            exc_paths = np.zeros((rows, cols))
+            step = 0.1  # step size in pixels, smaller = more accurate but slower
 
             for i in range(rows):
                 for j in range(cols):
                     if not mask[i, j]:
                         continue
 
-                    target_r, target_c = i + 0.5, j + 0.5
+                    target_r = i + 0.5
+                    target_c = j + 0.5
 
+                    # beam comes in from the right side of the image
                     steps_right = (cols - 1 - target_c) / abs(dx_exc)
                     row_at_right = target_r - dy_exc * steps_right
 
                     if row_at_right >= 0:
-                        start_r, start_c = row_at_right, cols - 1
+                        start_r = row_at_right
+                        start_c = cols - 1
                     else:
                         steps_top = target_r / dy_exc
-                        start_r, start_c = 0, target_c - dx_exc * steps_top
+                        start_r = 0
+                        start_c = target_c - dx_exc * steps_top
 
-                    r, c = start_r, start_c
+                    # walk along excitation ray and add up path length through sample
+                    r = start_r
+                    c = start_c
                     path = 0.0
                     while abs(r - target_r) > step or abs(c - target_c) > step:
                         if 0 <= int(r) < rows and 0 <= int(c) < cols:
                             if mask[int(r), int(c)]:
-                                path += step * pix
-                        r += dy_exc * step
-                        c += dx_exc * step
+                                path = path + step * pix
+                        r = r + dy_exc * step
+                        c = c + dx_exc * step
                         if r > rows or c < 0:
                             break
                     exc_paths[i, j] = path
 
-                    r, c = i + 0.5, j + 0.5
+                    # walk along detection ray outward from the pixel
+                    r = i + 0.5
+                    c = j + 0.5
                     path = 0.0
                     while 0 <= r < rows and 0 <= c < cols:
                         if mask[int(r), int(c)]:
-                            path += step * pix
-                        r += dy_det * step
-                        c += dx_det * step
+                            path = path + step * pix
+                        r = r + dy_det * step
+                        c = c + dx_det * step
                     det_paths[i, j] = path
 
+            # convert path lengths from um to cm for Beer-Lambert
             exc_cm = exc_paths * 1e-4
             det_cm = det_paths * 1e-4
+
+            # Beer-Lambert correction factor for each pixel
             corr = np.exp(density * (mu_exc * exc_cm + mu_xrf * det_cm))
 
             corrected = data.copy()
-            corrected[mask] *= corr[mask]
+            corrected[mask] = corrected[mask] * corr[mask]
 
         st.subheader("Results")
         st.write(f"max correction factor: **{corr[mask].max():.3f}**")
