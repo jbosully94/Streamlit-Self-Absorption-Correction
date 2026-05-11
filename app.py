@@ -26,9 +26,10 @@ with col1:
 with col2:
     data_upload = st.file_uploader("Upload XRF map to correct (TIFF)", type=["tif", "tiff"])
 
-if mask_upload and data_upload:
+mask_source = mask_upload if mask_upload else "examples/Fe0_SH_0_0001_Ca_K.tif"
+data_source = data_upload if data_upload else "examples/Fe0_SH_0_0001_Fe_K.tif"
 
-    mask_raw = tifffile.imread(mask_upload).astype(float)
+mask_raw = tifffile.imread(mask_source).astype(float)
     if mask_raw.ndim == 3:
         mask_raw = mask_raw[0]
     mask_raw = np.nan_to_num(mask_raw)
