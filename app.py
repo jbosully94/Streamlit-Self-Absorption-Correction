@@ -26,7 +26,7 @@ with col1:
 with col2:
     data_upload = st.file_uploader("Upload XRF map to correct (TIFF)", type=["tif", "tiff"])
 
-mask_source = mask_upload if mask_upload else "example/Fe0_SH_0_0001_Ca_K.tif"
+mask_source = mask_upload if mask_upload else "example/Fe0_SH_0_0001_Zn_K.tif"
 data_source = data_upload if data_upload else "example/Fe0_SH_0_0001_Fe_K.tif"
 
 mask_raw = tifffile.imread(mask_source).astype(float)
